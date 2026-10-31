@@ -1,0 +1,90 @@
+# Save this file in your GitHub repo as: .github/workflows/build.yml
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
+      - name: Create Android project around my files
+        run: |
+          mkdir -p /tmp/keep
+          cp pubspec.yaml /tmp/keep/pubspec.yaml
+          cp lib/main.dart /tmp/keep/main.dart
+          flutter create --platforms=android --org com.example --project-name expiry_app .
+          cp /tmp/keep/pubspec.yaml pubspec.yaml
+          cp /tmp/keep/main.dart lib/main.dart
+
+      - name: Add notification settings to Android files
+        run: |
+          python3 - << 'PY'
+          import os, re
+
+          # 1) Manifest: permissions + notification receivers
+          mp = 'android/app/src/main/AndroidManifest.xml'
+          s = open(mp).read()
+          perms = '''    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+          '''
+          recv = '''        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>
+                  <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                      </intent-filter>
+                  </receiver>
+          '''
+          if 'POST_NOTIFICATIONS' not in s:
+              s = s.replace('<application', perms + '    <application', 1)
+              s = s.replace('</application>', recv + '    </application>', 1)
+          open(mp, 'w').write(s)
+
+          # 2) Gradle: core library desugaring (needed by flutter_local_notifications)
+          kts = 'android/app/build.gradle.kts'
+          gr = 'android/app/build.gradle'
+          dep = 'com.android.tools:desugar_jdk_libs:2.0.4'
+          if os.path.exists(kts):
+              g = open(kts).read()
+              g = g.replace('compileOptions {', 'compileOptions {\n        isCoreLibraryDesugaringEnabled = true', 1)
+              g += '\ndependencies {\n    coreLibraryDesugaring("%s")\n}\n' % dep
+              open(kts, 'w').write(g)
+          else:
+              g = open(gr).read()
+              g = g.replace('compileOptions {', 'compileOptions {\n        coreLibraryDesugaringEnabled true', 1)
+              line = "    coreLibraryDesugaring '%s'" % dep
+              if re.search(r'^dependencies\s*\{', g, re.M):
+                  g = re.sub(r'^dependencies\s*\{', 'dependencies {\n' + line, g, count=1, flags=re.M)
+              else:
+                  g += '\ndependencies {\n' + line + '\n}\n'
+              open(gr, 'w').write(g)
+          print('Android files patched')
+          PY
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: expiry-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
